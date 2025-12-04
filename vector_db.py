@@ -3,7 +3,7 @@ ChromaDB Vector Database Implementation
 Handles PDF text extraction, chunking, and semantic search
 """
 import chromadb
-from sentence_transformers import SentenceTransformer
+from chromadb.utils import embedding_functions
 import PyPDF2
 import os
 import hashlib
@@ -16,25 +16,20 @@ class KnowledgePadVectorDB:
         self.client = chromadb.PersistentClient(path="./chroma_db")
         self.collection_name = "knowledge_documents"
         
-        # Initialize embedding model
-        self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-        self.embedding_dim = 384  # Dimension for all-MiniLM-L6-v2
+        # Use ChromaDB's default embedding function (lighter weight)
+        default_ef = embedding_functions.DefaultEmbeddingFunction()
         
         # Get or create collection
         self.collection = self.client.get_or_create_collection(
             name=self.collection_name,
-            metadata={"hnsw:space": "cosine"}  # Use cosine similarity
+            embedding_function=default_ef,
+            metadata={"hnsw:space": "cosine"}
         )
         
         print("✓ Vector database initialized")
     
     def extract_text_from_pdf(self, pdf_path: str) -> List[Dict]:
-        """
-        Extract text from PDF and split into chunks
-        
-        Returns:
-            List of dicts with page_number and text
-        """
+        """Extract text from PDF and split into chunks"""
         chunks = []
         
         try:
@@ -44,7 +39,7 @@ class KnowledgePadVectorDB:
                 for page_num, page in enumerate(pdf_reader.pages, start=1):
                     text = page.extract_text()
                     
-                    if text.strip():  # Only if page has text
+                    if text.strip():
                         chunks.append({
                             'page_number': page_num,
                             'text': text
@@ -58,17 +53,7 @@ class KnowledgePadVectorDB:
             return []
     
     def chunk_text(self, text: str, chunk_size=500, overlap=50) -> List[str]:
-        """
-        Split text into overlapping chunks
-        
-        Args:
-            text: Input text
-            chunk_size: Characters per chunk
-            overlap: Overlapping characters between chunks
-        
-        Returns:
-            List of text chunks
-        """
+        """Split text into overlapping chunks"""
         chunks = []
         start = 0
         text_length = len(text)
@@ -77,19 +62,17 @@ class KnowledgePadVectorDB:
             end = start + chunk_size
             chunk = text[start:end]
             
-            # Try to break at sentence boundary
             if end < text_length:
-                # Look for sentence end
                 last_period = chunk.rfind('.')
                 last_newline = chunk.rfind('\n')
                 break_point = max(last_period, last_newline)
                 
-                if break_point > chunk_size * 0.5:  # At least 50% into chunk
+                if break_point > chunk_size * 0.5:
                     chunk = text[start:start + break_point + 1]
                     end = start + break_point + 1
             
             chunks.append(chunk.strip())
-            start = end - overlap  # Overlap for context
+            start = end - overlap
         
         return chunks
     
@@ -99,47 +82,35 @@ class KnowledgePadVectorDB:
         return hashlib.md5(content.encode()).hexdigest()
     
     def add_pdf_to_db(self, pdf_path: str, pdf_filename: str = None):
-        """
-        Process PDF and add to vector database
-        
-        Args:
-            pdf_path: Path to PDF file
-            pdf_filename: Name to store in DB (if None, uses basename)
-        """
+        """Process PDF and add to vector database"""
         if pdf_filename is None:
             pdf_filename = os.path.basename(pdf_path)
         
         print(f"\n📄 Processing: {pdf_filename}")
         
-        # Extract text from PDF
         page_chunks = self.extract_text_from_pdf(pdf_path)
         
         if not page_chunks:
             print("✗ No text extracted from PDF")
             return
         
-        # Prepare data for insertion
         documents = []
         metadatas = []
         ids = []
-        
         total_chunks = 0
         
         for page_data in page_chunks:
             page_num = page_data['page_number']
             page_text = page_data['text']
             
-            # Split page into chunks
             chunks = self.chunk_text(page_text, chunk_size=500, overlap=50)
             
             for chunk_idx, chunk in enumerate(chunks):
-                if len(chunk) < 50:  # Skip very small chunks
+                if len(chunk) < 50:
                     continue
                 
-                # Generate unique chunk ID
                 chunk_id = self.generate_chunk_id(pdf_filename, page_num, chunk_idx)
                 
-                # Append to lists
                 documents.append(chunk)
                 metadatas.append({
                     'pdf_filename': pdf_filename,
@@ -147,46 +118,30 @@ class KnowledgePadVectorDB:
                     'chunk_index': chunk_idx
                 })
                 ids.append(chunk_id)
-                
                 total_chunks += 1
         
-        # Insert into ChromaDB (it auto-generates embeddings)
         if documents:
             self.collection.add(
                 documents=documents,
                 metadatas=metadatas,
                 ids=ids
             )
-            
             print(f"✓ Added {total_chunks} chunks to vector DB")
         else:
             print("✗ No valid chunks generated")
     
     def search(self, query: str, top_k=5, filter_pdf=None) -> List[Dict]:
-        """
-        Search for similar content
-        
-        Args:
-            query: Search query
-            top_k: Number of results to return
-            filter_pdf: Optional PDF filename filter
-        
-        Returns:
-            List of matching results with metadata
-        """
-        # Build filter if needed
+        """Search for similar content"""
         where_filter = None
         if filter_pdf:
             where_filter = {"pdf_filename": filter_pdf}
         
-        # Search
         results = self.collection.query(
             query_texts=[query],
             n_results=top_k,
             where=where_filter
         )
         
-        # Format results
         formatted_results = []
         
         if results and results['documents'] and len(results['documents']) > 0:
@@ -198,7 +153,7 @@ class KnowledgePadVectorDB:
                     'text': doc,
                     'pdf_filename': metadata.get('pdf_filename', ''),
                     'page_number': metadata.get('page_number', 0),
-                    'similarity_score': 1 - distance,  # Convert distance to similarity
+                    'similarity_score': 1 - distance,
                     'chunk_id': results['ids'][0][i]
                 })
         
@@ -209,6 +164,5 @@ class KnowledgePadVectorDB:
         count = self.collection.count()
         return {
             'total_chunks': count,
-            'collection_name': self.collection_name,
-            'embedding_dimension': self.embedding_dim
+            'collection_name': self.collection_name
         }
